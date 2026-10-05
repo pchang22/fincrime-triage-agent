@@ -7,7 +7,7 @@ A small-scale model of a bank's financial-crime operations queue: sanctions scre
 In progress: Stage 1 (loading and normalizing the OFAC SDN list)
 
 ## Roadmap
-- [ ] Stage 1: Load and clean the OFAC sanctions list
+- [x] Stage 1: Load and clean the OFAC sanctions list
 - [ ] Stage 2: Generate synthetic customers and transactions
 - [ ] Stage 3: Name screening (exact → fuzzy matching)
 - [ ] Stage 4: Transaction monitoring rules
