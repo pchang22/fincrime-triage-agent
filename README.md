@@ -22,7 +22,11 @@ See [LEARNING_LOG.md](LEARNING_LOG.md) for what I'm learning along the way.
 
 ## Top Sanctions Program
 RUSSIA-EO14024 (5,664) covers Russia sanctions, which expanded massively after the 2022 invasion of Ukraine. It's the biggest program by far.
+
 SDGT (2,185) covers terrorism.
+
 SDNTK (1,332) covers drug kingpins and cartels.
+
 IRAN-EO13902 (942) covers Iran's oil, metals and other economic sectors.
+
 GLOMAG (723) is Global Magnitsky, which targets human-rights abusers and corrupt officials worldwide.
