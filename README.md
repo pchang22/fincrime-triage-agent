@@ -4,7 +4,7 @@
 A small-scale model of a bank's financial-crime operations queue: sanctions screening, transaction monitoring, and an AI agent that triages flagged cases, auto-closing routine ones and escalating the rest to a human.
 
 ## Status
-In progress: Stage 2 (Generate synthetic customers and transactions)
+In progress: Stage 2 (Name screening, exact → fuzzy matching))
 
 ## Roadmap
 - [x] Stage 1: Load and clean the OFAC sanctions list
