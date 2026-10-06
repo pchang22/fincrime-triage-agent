@@ -12,8 +12,12 @@ Checks every customer's name against all 39,000+ names on the OFAC list
 Then it grades each version against the answer key from Stage 2.
 
 Inputs:  data/screening_list.csv, data/customers.csv, data/answer_key.csv
+  v4  tuned      v3, after investigating its false positives: a partial match
+                 must include the person's first given name, and is capped
+                 at 90 (review), never "strong"
+
 Outputs: data/screening_results.csv   best match + scores for every customer
-         data/screening_alerts.csv    customers v3 sends to review
+         data/screening_alerts.csv    customers v4 sends to review
 """
 
 import numpy as np
@@ -104,6 +108,47 @@ def screen_fuzzy_plus(customers, screening, sort_scores):
     return pd.DataFrame(out, columns=["score", "match_idx"])
 
 
+PARTIAL_CAP = 90   # v4: a partial (missing-words) match is never "strong"
+
+
+def given_first_name(raw_name, entry_type):
+    """'ABU MARZOOK, Mousa Mohammed' -> 'mousa'. None for companies etc."""
+    if entry_type != "individual" or not isinstance(raw_name, str) or "," not in raw_name:
+        return None
+    given = normalize_name(raw_name.split(",", 1)[1], False)
+    return given.split()[0] if given else None
+
+
+def screen_v4(customers, screening, sort_scores):
+    """v4 = v3 with two fixes found by investigating v3's false positives:
+    1. A partial match must contain the listed person's first given name.
+       ('James Wilson' matched 'JAMES WILSON, Alejandro Antonio' because
+       the customer's first name matched half of the listed SURNAME.)
+    2. A partial match is capped at 90: missing words mean less certainty,
+       so it goes to human review rather than being called a strong match."""
+    set_scores = process.cdist(customers["name_normalized"], screening["name_normalized"],
+                               scorer=fuzz.token_set_ratio, dtype=np.uint8, workers=-1)
+    names = screening["name_normalized"].to_numpy()
+    firsts = [given_first_name(n, t) for n, t in zip(screening["name"], screening["type"])]
+    out = []
+    for i, cust_name in enumerate(customers["name_normalized"]):
+        cust_words = set(cust_name.split())
+        best_score = int(sort_scores[i].max())
+        best_idx = int(sort_scores[i].argmax())
+        for j in np.argsort(set_scores[i])[::-1][:25]:
+            s = min(int(set_scores[i, j]), PARTIAL_CAP)
+            if s <= best_score:
+                break
+            if shared_words(cust_name, names[j]) < 2:
+                continue
+            if firsts[j] is not None and firsts[j] not in cust_words:
+                continue
+            best_score, best_idx = s, int(j)
+            break
+        out.append((best_score, best_idx))
+    return pd.DataFrame(out, columns=["score", "match_idx"])
+
+
 # ----------------------------------------------------------------------------
 # Grading against the answer key
 # ----------------------------------------------------------------------------
@@ -134,7 +179,8 @@ def main():
     v1 = screen_exact(customers, screening)
     v2, sort_scores = screen_fuzzy(customers, screening)
     v3 = screen_fuzzy_plus(customers, screening, sort_scores)
-    versions = {"v1 exact": v1, "v2 fuzzy": v2, "v3 fuzzy+": v3}
+    v4 = screen_v4(customers, screening, sort_scores)
+    versions = {"v1 exact": v1, "v2 fuzzy": v2, "v3 fuzzy+": v3, "v4 tuned": v4}
 
     # --- Scorecard ---
     n_hits = int((key["category"] == "sanctions").sum())
@@ -152,32 +198,33 @@ def main():
     for i in key.index[hits]:
         scores = "  ".join(f"{versions[v].loc[i, 'score']:>3}" for v in versions)
         print(f"  {key.loc[i, 'reason']:<26} {customers.loc[i, 'name'][:32]:<33} {scores}")
-    print(f"  {'':<26} {'':<33} {'v1':>3}  {'v2':>3}  {'v3':>3}")
+    print(f"  {'':<26} {'':<33} {'v1':>3}  {'v2':>3}  {'v3':>3}  {'v4':>3}")
 
-    # --- Threshold sweep for v3: the core tradeoff ---
-    print("\nv3 threshold sweep (lower threshold = catch more, but more false alarms):")
+    # --- Threshold sweep for v4: the core tradeoff ---
+    print("\nv4 threshold sweep (lower threshold = catch more, but more false alarms):")
     print(f"  {'threshold':>9}{'caught':>8}{'false pos':>11}")
     for t in [70, 75, 80, 85, 90, 95, 100]:
-        g = grade(v3, key, t)
+        g = grade(v4, key, t)
         print(f"  {t:>9}{g['caught']:>5}/{n_hits:<2}{g['false_positives']:>11}")
 
-    # --- Save results (v3 is the version we use going forward) ---
-    m = screening.loc[v3["match_idx"]].reset_index(drop=True)
+    # --- Save results (v4 is the version we use going forward) ---
+    m = screening.loc[v4["match_idx"]].reset_index(drop=True)
     results = pd.DataFrame({
         "customer_id": customers["customer_id"],
         "customer_name": customers["name"],
         "score_v1": v1["score"], "score_v2": v2["score"], "score_v3": v3["score"],
-        "decision": v3["score"].map(band),
+        "score_v4": v4["score"],
+        "decision": v4["score"].map(band),
         "matched_list_name": m["name"],
         "matched_ent_num": m["ent_num"],
         "matched_program": m["program"],
         "matched_is_alias": m["is_alias"],
     })
     results.to_csv(DATA_DIR / "screening_results.csv", index=False, encoding="utf-8-sig")
-    alerts = results[results["decision"] != "clear"].sort_values("score_v3", ascending=False)
+    alerts = results[results["decision"] != "clear"].sort_values("score_v4", ascending=False)
     alerts.to_csv(DATA_DIR / "screening_alerts.csv", index=False, encoding="utf-8-sig")
 
-    print(f"\nv3 decisions: {results['decision'].value_counts().to_dict()}")
+    print(f"\nv4 decisions: {results['decision'].value_counts().to_dict()}")
     print("Saved data/screening_results.csv and data/screening_alerts.csv")
 
 
