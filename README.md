@@ -8,7 +8,7 @@ In progress: Stage 1 (loading and normalizing the OFAC SDN list)
 
 ## Roadmap
 - [x] Stage 1: Load and clean the OFAC sanctions list
-- [ ] Stage 2: Generate synthetic customers and transactions
+- [x] Stage 2: Generate synthetic customers and transactions
 - [ ] Stage 3: Name screening (exact → fuzzy matching)
 - [ ] Stage 4: Transaction monitoring rules
 - [ ] Stage 5: AI case reviewer
