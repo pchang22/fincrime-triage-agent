@@ -13,8 +13,9 @@ Run:   python src/agent_review.py            (uses claude if a key exists, else 
 
 Whichever reviewer is used, GUARDRAILS in code have the final say: a case
 may only be auto-closed if the reviewer is highly confident AND it has no
-suspicious-behaviour alerts AND no strong sanctions match AND the listed
-person's first name and surname don't both appear in the customer's name.
+suspicious-behaviour alerts AND no strong sanctions match AND the customer's
+date of birth doesn't match a listed one AND (when no DOB comparison is
+possible) the listed first name and surname don't both appear in the name.
 The AI advises; the code enforces policy.
 
 Inputs:  data/cases.csv, data/screening_alerts.csv, data/customers.csv,
@@ -80,7 +81,36 @@ def compare_names(customer_name, list_name):
     }
 
 
-def review_rules(case, screen):
+DOB_MISMATCH_YEARS = 3   # DOBs this many years apart = different people
+
+
+def compare_dob(customer, screen):
+    """Compare the customer's date of birth with the listed person's DOB(s).
+    status: match (same year) | near (1-2 years) | mismatch (3+) | unknown."""
+    out = {"status": "unknown", "gap": None,
+           "customer_dob": customer.get("date_of_birth") if customer is not None else None,
+           "listed_dob": getattr(screen, "matched_dob", None) if screen is not None else None}
+    years = getattr(screen, "matched_dob_years", None) if screen is not None else None
+    cust_dob = out["customer_dob"]
+    if not isinstance(years, str) or not isinstance(cust_dob, str):
+        return out
+    cust_year = int(cust_dob[:4])
+    gap = min(abs(cust_year - int(y)) for y in years.split("|"))
+    out["gap"] = gap
+    out["status"] = ("match" if gap == 0 else
+                     "near" if gap < DOB_MISMATCH_YEARS else "mismatch")
+    return out
+
+
+def dob_sentence(dob):
+    if dob["status"] == "unknown":
+        why = "no DOB listed for the sanctioned person" if dob["customer_dob"] else "no customer DOB on file"
+        return f"DOB check: not possible ({why})."
+    return (f"DOB check: customer {dob['customer_dob']} vs listed {dob['listed_dob']} -> "
+            f"{dob['status']} (closest listed year {dob['gap']} year(s) apart).")
+
+
+def review_rules(case, screen, dob):
     """Deterministic policy. Returns (decision, confidence, reason)."""
     behaviour = behaviour_rules(case)
     if behaviour:
@@ -94,6 +124,17 @@ def review_rules(case, screen):
                 f"Strong name match ({int(screen.score_v4)}/100) to SDN '{screen.matched_list_name}'. "
                 f"Treat as a likely true hit: hold activity pending investigation.")
 
+    # Date of birth is the strongest evidence, so check it first.
+    if dob["status"] in ("match", "near"):
+        return ("escalate", "high",
+                f"Possible name match to '{screen.matched_list_name}' and the birth year "
+                f"lines up. {dob_sentence(dob)} Treat as a potential true hit.")
+    if dob["status"] == "mismatch":
+        return ("close", "high",
+                f"Name resembles '{screen.matched_list_name}', but {dob_sentence(dob)} "
+                f"A {dob['gap']}-year gap means a different person.")
+
+    # No DOB to compare: fall back to judging the names alone.
     parts = compare_names(screen.customer_name, screen.matched_list_name)
     if parts is None:
         return "escalate", "low", "Matched an entity name; needs manual comparison."
@@ -130,14 +171,18 @@ Policy:
 1. Transaction-monitoring alerts (structuring, rapid movement, high-risk
    geography, velocity spike, round amounts): we have no customer due-diligence
    information in this exercise, so escalate them, and explain the risk.
-2. Sanctions name alerts: close ONLY if the name evidence itself clearly shows a
-   different person, e.g. the surname is clearly different and only a common
-   given name is shared, or the given name is clearly a different name.
-   Spelling variants, transliterations, nicknames, reordered names, missing
-   middle names, and a dropped second surname (common in Spanish naming) are
-   NOT grounds to close.
-3. Do not use the customer's country of residence to clear a sanctions alert:
-   sanctioned people often live abroad.
+2. Sanctions name alerts. Date of birth is the strongest evidence:
+   a. If the customer's DOB matches, or is within 2 years of, any DOB listed for
+      the sanctioned person: escalate.
+   b. If the customer's DOB differs from EVERY listed DOB by 3 or more years:
+      you may close it as a different person, even if the names are similar.
+   c. If either DOB is missing, judge on names alone: close ONLY if the name
+      evidence clearly shows a different person (e.g. surname clearly different
+      and only a common given name shared). Spelling variants, transliterations,
+      nicknames, reordered names, missing middle names, and a dropped second
+      surname (common in Spanish naming) are NOT grounds to close.
+3. Do not clear a sanctions alert on the customer's country of residence or the
+   listed nationality alone: sanctioned people often live abroad.
 4. When in doubt, escalate. Missing a sanctioned person or a launderer costs far
    more than an extra review.
 
@@ -156,15 +201,26 @@ SCHEMA = {
 }
 
 
-def describe_case(case, customer, txns):
+def describe_case(case, customer, txns, screen, dob):
     """Turn a case into the plain-text brief the AI reads."""
+    cust_dob = customer.get("date_of_birth")
     lines = [
         f"Case {case.case_id} | customer {case.customer_id}: {case.customer_name} "
         f"({case.customer_type}, resident in {case.country}, account opened "
-        f"{customer.account_opened})",
+        f"{customer.account_opened}, date of birth "
+        f"{cust_dob if isinstance(cust_dob, str) else 'not on file'})",
         f"Alerts ({case.alert_count}):",
         *[f"  - {d}" for d in str(case.alert_details).split(" | ")],
     ]
+    if screen is not None:
+        listed = getattr(screen, "matched_dob", None)
+        nat = getattr(screen, "matched_nationality", None)
+        lines += [
+            "Listed (sanctioned) person's identifiers:",
+            f"  - DOB: {listed if isinstance(listed, str) else 'not listed'}",
+            f"  - Nationality: {nat if isinstance(nat, str) else 'not listed'}",
+            f"  - {dob_sentence(dob)}",
+        ]
     ids = [t for t in str(case.txn_ids).split(";") if t and t != "nan"][:MAX_TXNS_SHOWN]
     if ids:
         lines.append("Flagged transactions:")
@@ -191,12 +247,12 @@ def make_ai_reviewer(api_key):
     import anthropic                       # only needed in AI mode
     client = anthropic.Anthropic(api_key=api_key)
 
-    def review(case, customer, txns):
+    def review(case, customer, txns, screen, dob):
         response = client.messages.create(
             model=MODEL,
             max_tokens=600,
             system=POLICY,
-            messages=[{"role": "user", "content": describe_case(case, customer, txns)}],
+            messages=[{"role": "user", "content": describe_case(case, customer, txns, screen, dob)}],
             output_config={"format": {"type": "json_schema", "schema": SCHEMA}},
         )
         text = next(b.text for b in response.content if b.type == "text")
@@ -209,14 +265,16 @@ def make_ai_reviewer(api_key):
 # ----------------------------------------------------------------------------
 # Guardrails: code, not the reviewer, has the final say on auto-closing
 # ----------------------------------------------------------------------------
-def apply_guardrails(case, decision, confidence, screen):
+def apply_guardrails(case, decision, confidence, screen, dob):
     if decision != "close":
         return decision, ""
     if behaviour_rules(case):
         return "escalate", "guardrail: behaviour alerts can't be auto-closed"
     if "sanctions_strong_match" in str(case.rules_triggered):
         return "escalate", "guardrail: strong sanctions matches can't be auto-closed"
-    if screen is not None:
+    if dob["status"] in ("match", "near"):
+        return "escalate", "guardrail: customer DOB matches (or is near) a listed DOB"
+    if screen is not None and dob["status"] == "unknown":
         parts = compare_names(screen.customer_name, screen.matched_list_name)
         if parts and parts["given_score"] >= 0.85 and parts["surname_score"] >= 0.80:
             return "escalate", ("guardrail: listed first name AND surname both appear "
@@ -247,18 +305,21 @@ def main():
     rows = []
     for case in cases.itertuples():
         screen = screening.loc[case.customer_id] if case.customer_id in screening.index else None
+        customer = customers.loc[case.customer_id]
+        dob = compare_dob(customer, screen)
         try:
             if mode == "claude":
-                decision, confidence, reason = ai_review(case, customers.loc[case.customer_id], txns)
+                decision, confidence, reason = ai_review(case, customer, txns, screen, dob)
             else:
-                decision, confidence, reason = review_rules(case, screen)
+                decision, confidence, reason = review_rules(case, screen, dob)
         except Exception as e:                     # an AI/API failure must never close a case
             decision, confidence, reason = "escalate", "low", f"Reviewer error, escalated: {e}"
-        final, override = apply_guardrails(case, decision, confidence, screen)
+        final, override = apply_guardrails(case, decision, confidence, screen, dob)
         rows.append({
             "case_id": case.case_id, "customer_id": case.customer_id,
             "customer_name": case.customer_name, "case_risk": case.case_risk,
             "rules_triggered": case.rules_triggered, "reviewer": reviewer_name,
+            "dob_check": dob["status"] if screen is not None else "",
             "reviewer_decision": decision, "confidence": confidence,
             "final_decision": final, "guardrail_note": override, "reason": reason,
         })
@@ -281,6 +342,8 @@ def main():
     print(f"  Escalated to a human:    {len(escalated)}")
     print(f"  Real cases wrongly closed: {len(bad_closes)}   <- must be 0")
     print(f"  Guardrail overrides:     {(out.guardrail_note != '').sum()}")
+    sanc = out[out.dob_check != ""]
+    print(f"  DOB evidence (sanctions cases): {sanc.dob_check.value_counts().to_dict()}")
     if len(bad_closes):
         print("  !! Wrongly closed:", ", ".join(bad_closes.customer_name))
     if len(closed):

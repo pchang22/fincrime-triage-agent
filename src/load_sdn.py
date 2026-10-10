@@ -64,6 +64,30 @@ def normalize_name(name, is_individual):
     return name
 
 
+def parse_identifiers(remarks):
+    """Pull date(s) of birth and nationality out of OFAC's free-text remarks.
+
+    Remarks look like: 'DOB 09 Feb 1951; alt. DOB 1952; POB Gaza; nationality
+    Iran; Passport 1234 (Iran)'. A person can have several DOBs, a year only,
+    'circa 1960', or a range '1955 to 1958'. We keep the raw text for humans
+    and a list of every possible birth year for code to compare against.
+    """
+    if not isinstance(remarks, str):
+        return pd.NA, pd.NA, pd.NA
+    dob_texts = [d.strip() for d in re.findall(r"DOB\s+([^;]+)", remarks)]
+    years = set()
+    for d in dob_texts:
+        found = [int(y) for y in re.findall(r"\b(1[89]\d\d|20\d\d)\b", d)]
+        if " to " in d and len(found) == 2:           # a range: '1955 to 1958'
+            years.update(range(min(found), max(found) + 1))
+        else:
+            years.update(found)
+    nationalities = [n.strip() for n in re.findall(r"nationality\s+([^;.]+)", remarks, re.I)]
+    return (" / ".join(dob_texts) or pd.NA,
+            "|".join(str(y) for y in sorted(years)) or pd.NA,
+            " / ".join(dict.fromkeys(nationalities)) or pd.NA)
+
+
 def main():
     sdn = read_ofac_csv(DATA_DIR / "SDN.CSV", SDN_COLS)
     alt = read_ofac_csv(DATA_DIR / "ALT.CSV", ALT_COLS)
@@ -71,15 +95,21 @@ def main():
     # A blank type means the entry is a company/organization.
     sdn["type"] = sdn["type"].fillna("entity")
 
+    # Secondary identifiers (DOB, nationality) from the remarks column.
+    # Analysts use these to tell two people with similar names apart.
+    sdn[["dob", "dob_years", "nationality"]] = pd.DataFrame(
+        [parse_identifiers(r) for r in sdn["remarks"]], index=sdn.index)
+    ids = ["dob", "dob_years", "nationality"]
+
     # --- Primary names ---
-    primary = sdn[["ent_num", "name", "type", "program"]].copy()
+    primary = sdn[["ent_num", "name", "type", "program", *ids]].copy()
     primary["is_alias"] = False
 
-    # --- Aliases: attach type/program from the main list via ent_num ---
-    aliases = alt.merge(sdn[["ent_num", "type", "program"]],
+    # --- Aliases: attach type/program/identifiers from the main list via ent_num ---
+    aliases = alt.merge(sdn[["ent_num", "type", "program", *ids]],
                         on="ent_num", how="left")
     aliases = aliases.rename(columns={"alt_name": "name"})
-    aliases = aliases[["ent_num", "name", "type", "program", "alt_type"]]
+    aliases = aliases[["ent_num", "name", "type", "program", "alt_type", *ids]]
     aliases["is_alias"] = True
 
     # --- Combine into one screening list ---
@@ -101,6 +131,9 @@ def main():
     print(f"Total names to screen against: {len(screening):,}")
     print("\nTop 5 sanctions programs:")
     print(sdn["program"].value_counts().head(5).to_string())
+    ind = sdn[sdn["type"] == "individual"]
+    print(f"\nIndividuals with a date of birth listed: "
+          f"{ind['dob'].notna().sum():,} of {len(ind):,}")
     print("\nExample normalized names:")
     print(screening[["name", "name_normalized"]].head(5).to_string(index=False))
     print(f"\nSaved to {out}")

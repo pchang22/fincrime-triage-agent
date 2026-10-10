@@ -219,6 +219,10 @@ def main():
         "matched_ent_num": m["ent_num"],
         "matched_program": m["program"],
         "matched_is_alias": m["is_alias"],
+        # secondary identifiers, used by the Stage 5 reviewer (not for scoring)
+        "matched_dob": m.get("dob"),
+        "matched_dob_years": m.get("dob_years"),
+        "matched_nationality": m.get("nationality"),
     })
     results.to_csv(DATA_DIR / "screening_results.csv", index=False, encoding="utf-8-sig")
     alerts = results[results["decision"] != "clear"].sort_values("score_v4", ascending=False)

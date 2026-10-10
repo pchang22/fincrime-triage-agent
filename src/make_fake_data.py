@@ -11,6 +11,7 @@ It exists only so we can measure how well those later stages work.
 """
 
 import random
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -79,6 +80,22 @@ def misspell(word):
         if new.lower() != word.lower():
             return new
     return word + "h"  # fallback: still a one-letter difference
+
+
+def listed_birth_date(row):
+    """A planted hit IS the sanctioned person, so give them the listed DOB.
+    Full date if OFAC has one; if only a year, a fixed date in that year.
+    Uses its own random generator so the rest of the fake data is unchanged."""
+    dob = row.get("dob")
+    if isinstance(dob, str):
+        m = re.search(r"(\d{1,2}) ([A-Za-z]{3}) (\d{4})", dob)
+        if m:
+            return datetime.strptime(" ".join(m.groups()), "%d %b %Y").date()
+    years = row.get("dob_years")
+    if isinstance(years, str) and years:
+        rng = random.Random(int(row["ent_num"]))
+        return datetime(int(years.split("|")[0]), rng.randint(1, 12), rng.randint(1, 28)).date()
+    return None   # OFAC lists no DOB: keep the made-up one
 
 
 def split_ofac_name(raw):
@@ -153,6 +170,9 @@ def plant_sanctions_hits(screening):
 
         cust = make_normal_customer()
         cust.update(name=name, customer_type="individual")
+        listed_dob = listed_birth_date(row)
+        if listed_dob is not None:
+            cust["date_of_birth"] = listed_dob
         planted.append((cust, {
             "should_flag": True, "category": "sanctions", "reason": f"sanctions_{v}",
             "matched_ent_num": int(row["ent_num"]),
